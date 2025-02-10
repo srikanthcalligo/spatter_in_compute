@@ -1,0 +1,35 @@
+1587-151 The OMP_PLACES environment variable does not support 'sockets' for this platform. Reverting to 'cores' . 
+1587-156 Insufficient threads on place 0 with the MASTER proc_bind policy. May take threads from other places. The result of the program may be altered if the OMP_THREAD_LIMIT is not increased.
+-------------------------------------------------------------
+STREAM version $Revision: 5.10 $
+-------------------------------------------------------------
+This system uses 8 bytes per array element.
+-------------------------------------------------------------
+Array size = 126000000 (elements), Offset = 0 (elements)
+Memory per array = 961.3 MiB (= 0.9 GiB).
+Total memory required = 2883.9 MiB (= 2.8 GiB).
+Each kernel will be executed 100 times.
+ The *best* time for each kernel (excluding the first iteration)
+ will be used to compute the reported bandwidth.
+-------------------------------------------------------------
+Number of Threads requested = 64
+Number of Threads counted = 64
+-------------------------------------------------------------
+Your clock granularity/precision appears to be 1 microseconds.
+Each test below will take on the order of 8291 microseconds.
+   (= 8291 clock ticks)
+Increase the size of the arrays if this shows that
+you are not getting at least 20 clock ticks per test.
+-------------------------------------------------------------
+WARNING -- The above is only a rough guideline.
+For best results, please be sure you know the
+precision of your system timer.
+-------------------------------------------------------------
+Function    Best Rate MB/s  Avg time     Min time     Max time
+Copy:          182341.4     0.011304     0.011056     0.011492
+Scale:         167400.2     0.012281     0.012043     0.012747
+Add:           198764.7     0.015341     0.015214     0.015715
+Triad:         163788.0     0.018567     0.018463     0.018756
+-------------------------------------------------------------
+Solution Validates: avg error less than 1.000000e-13 on all three arrays
+-------------------------------------------------------------
