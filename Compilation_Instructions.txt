@@ -18,11 +18,13 @@ Step 3 : Add the following lines to /home/user/tt-metal/tt_metal/programming_exa
 Step 4 : Change the following configuration settings for different runs in spatter_in_compute/src/Spatter/CMakeLists.txt file
 
 	
-		To Run on the HOST
-		******************  
+	To Run on the HOST
+	******************  
         #add_definitions(-DTT_SPATTER_ENABLE)
         #add_definitions(-DTT_SPATTER_PARALLEL_ENABLE)
-        
+		* To Enable OpenMP version on the Host machine change the status of following flag to "on" in spatter_in_compute/CMakeLists.txt file
+		set(USE_OPENMP off) - > set(USE_OPENMP on)
+	Note : Please make sure the status of OPENMP flag is off when we run the application on the TT-metalium.
         To Run on the TT with single core - Enabled by default
         ******************************************************
         add_definitions(-DTT_SPATTER_ENABLE)
