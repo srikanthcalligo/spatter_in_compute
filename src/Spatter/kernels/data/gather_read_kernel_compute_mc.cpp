@@ -51,8 +51,6 @@ void kernel_main()
     };
 
     for(uint32_t tile_id = core_id*num_output_tiles_per_core; tile_id < (core_id*num_output_tiles_per_core+num_output_tiles_per_core); tile_id++) {
-
-    //for(uint32_t i = 0; i < n_tiles; i++) {
         cb_reserve_back(sparse_cb_id0, 1);
         uint32_t cb_in0_addr = get_write_ptr(sparse_cb_id0);
 
