@@ -20,7 +20,7 @@ void MAIN {
 
     binary_op_init_common(cb_in0, cb_in1, cb_out0);
     
-    mul_tiles_init();
+    add_tiles_init();
 
     acquire_dst(tt::DstMode::Full);
     
@@ -29,7 +29,7 @@ void MAIN {
         cb_wait_front(cb_in0, 1);
         cb_wait_front(cb_in1, 1);
 
-        mul_tiles(cb_in0, cb_in1, 0, 0, 0);
+        add_tiles(cb_in0, cb_in1, 0, 0, 0);
 
         cb_pop_front(cb_in0, 1); 
         cb_pop_front(cb_in1, 1);   
