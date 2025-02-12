@@ -573,18 +573,18 @@ void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
     }
     uint32_t stride_len = pattern[1];
     float in_val = 0;
-    float in_val1 = 1;
+    //float in_val1 = 1;
     bfloat16 num_1_bfloat16, num_2_bfloat16;
 
     for(int i=0 , j=0; i < single_tile_size ; i=i+stride_len, j++){
-      if(stride_len == 1){
-        num_1_bfloat16 = bfloat16(in_val1);
-        num_2_bfloat16 = bfloat16(in_val1);
-      }
-      if(stride_len == 2){
-        num_1_bfloat16 = bfloat16(in_val1);
+      //if(stride_len == 1){
+        num_1_bfloat16 = bfloat16(in_val);
         num_2_bfloat16 = bfloat16(in_val);
-      }
+      //}
+      //if(stride_len == 2){
+      //  num_1_bfloat16 = bfloat16(in_val1);
+      //  num_2_bfloat16 = bfloat16(in_val);
+      //}
       pattern_mat_val.at(j) = pack_two_bfloat16_into_uint32(std::pair<bfloat16, bfloat16>(num_1_bfloat16, num_2_bfloat16));
     }
 
