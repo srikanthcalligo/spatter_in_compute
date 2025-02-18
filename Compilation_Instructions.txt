@@ -13,9 +13,22 @@ Step 2 : Clone the Spatter repository
 		 https://github.com/srikanthcalligo/spatter_in_compute.git
 		 cd spatter_in_compute
 		 git checkout compute_v1
+		
+		 Add below lines to /home/user/tt-metal/tt_metal/programming_examples/CMakeLists.txt file
+		 	
+		 	add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/spatter_in_compute)
+			# Add only spatter_in_compute to the below existing line 
+			add_custom_target(
+    			programming_examples
+    			DEPENDS
+        			profiler_examples
+        			contributed
+        			spatter_in_compute
+        			${PROGRAMMING_EXAMPLES_TEST_TARGETS}
+			)
 		 
 		 cd /home/user/tt-metal
-		 
+		  
 		 ./build_metal.sh --enable-profiler --build-programming-examples
 		 
 
