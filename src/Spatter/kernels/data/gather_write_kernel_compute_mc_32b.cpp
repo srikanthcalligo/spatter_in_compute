@@ -15,7 +15,7 @@ void kernel_main(){
     const InterleavedAddrGenFast<true> dest = {
         .bank_base_address = dst_addr,
         .page_size = ublock_size_bytes,
-        .data_format = DataFormat::Float16_b,
+        .data_format = DataFormat::Float32,
     };
     //Writing the final tile of each thread to DRAM
     //for(uint32_t tile_id = core_id*num_output_tiles_per_core; tile_id < (core_id*num_output_tiles_per_core+num_output_tiles_per_core); tile_id++) {

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include "compute_kernel_api/eltwise_binary.h"
 //#include "debug/dprint.h"
+//#include "tools/profiler/kernel_profiler.hpp"
 
 namespace NAMESPACE {
 void MAIN {
@@ -24,27 +25,27 @@ void MAIN {
     
     add_tiles_init(cb_in0, cb_in1);
 
-    acquire_dst();
-
     //DPRINT << "Hello core =" << core_id << ENDL(); 
     
     for(uint32_t tile_id = core_id*num_output_tiles_per_core; tile_id < (core_id*num_output_tiles_per_core+num_output_tiles_per_core); tile_id++)
     {
+        //DeviceZoneScopedN("TEST-FULL");
+        acquire_dst();
         cb_wait_front(cb_in0, 1);
         cb_wait_front(cb_in1, 1);
 
         add_tiles(cb_in0, cb_in1, 0, 0, 0);
 
         cb_pop_front(cb_in0, 1); 
-        cb_pop_front(cb_in1, 1);   
-    }
+        cb_pop_front(cb_in1, 1);
+        cb_reserve_back(cb_out0, 1);
 
-    cb_reserve_back(cb_out0, 1);
-
-    pack_tile(0, cb_out0);
+        pack_tile(0, cb_out0);
     
-    cb_push_back(cb_out0, 1);
+        cb_push_back(cb_out0, 1);
 
-    release_dst();
+        release_dst();   
+    }
+    
 }
 }

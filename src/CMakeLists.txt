@@ -14,8 +14,8 @@ target_include_directories(
                 ${PROJECT_SOURCE_DIR}/tt_metal/common
                 ${CMAKE_CURRENT_SOURCE_DIR}
                 ${PROJECT_SOURCE_DIR}/tt_metal/programming_examples/spatter_in_compute/src/Spatter
-                ${PROJECT_SOURCE_DIR}/tt_metal/programming_examples/spatter_in_compute/build_serial/_deps/nlohmann_json-src/include
         )
+#                ${PROJECT_SOURCE_DIR}/tt_metal/programming_examples/spatter_in_compute/build_serial/_deps/nlohmann_json-src/include
 
 target_link_libraries(
             spatter_in_compute_core

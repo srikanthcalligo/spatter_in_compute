@@ -1,11 +1,8 @@
 # Spatter/src/Spatter/CMakeLists.txt
 
 #Added by Calligo
-# It will run on TT riscv engine with single core, Comment below line to run Spatter on the HOST,  
-add_definitions(-DTT_SPATTER_ENABLE)
-
-# Uncomment below line for multicore version and comment the above line (-DTT_SPATTER_ENABLE)
-#add_definitions(-DTT_SPATTER_PARALLEL_ENABLE)
+# It will enable debug prints  
+add_definitions(-DPRINT_DEBUG)
 
 if (USE_CUDA)
     add_library(cuda_backend SHARED CudaBackend.cu)

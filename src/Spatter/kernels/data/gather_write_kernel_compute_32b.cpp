@@ -4,13 +4,13 @@ void kernel_main(){
     uint32_t dst_addr  = get_arg_val<uint32_t>(0);
     uint32_t n_tiles  = get_arg_val<uint32_t>(1);
 
-    constexpr uint32_t cb_id_out0 = tt::CBIndex::c_2;
+    constexpr uint32_t cb_id_out0 = tt::CB::c_out0;
     uint32_t ublock_size_bytes = get_tile_size(cb_id_out0);
 
     const InterleavedAddrGenFast<true> dest = {
         .bank_base_address = dst_addr,
         .page_size = ublock_size_bytes,
-        .data_format = DataFormat::Float16_b,
+        .data_format = DataFormat::Float32,
     };
     for(uint32_t i = 0; i < n_tiles; i++) {
         cb_wait_front(cb_id_out0, 1);

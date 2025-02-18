@@ -5,8 +5,8 @@
 #include <zlib.h>
 
 //#include "common/core_coord.h"
-#include "tt_metal/host_api.hpp"
-#include "tt_metal/impl/device/device.hpp"
+//#include "tt_metal/host_api.hpp"
+//#include "tt_metal/impl/device/device.hpp"
 // compile with -lz
 
 #define NBUFS (1 << 18) // gzfile read buffer

@@ -9,7 +9,6 @@ void kernel_main()
     uint32_t sparse_dram_addr = get_arg_val<uint32_t>(0);
     uint32_t pattern_dram_addr = get_arg_val<uint32_t>(1);    
     uint32_t n_tiles =  get_arg_val<uint32_t>(2);    
-    
     uint32_t num_tiles_written = get_arg_val<uint32_t>(3);
     uint32_t num_output_tiles_per_core = get_arg_val<uint32_t>(4);
     uint32_t core_id = get_arg_val<uint32_t>(5);
@@ -23,7 +22,7 @@ void kernel_main()
     /*const InterleavedAddrGenFast<true> pattern_arr = {
         .bank_base_address = pattern_dram_addr,
         .page_size = pattern_tile_size,
-        .data_format = DataFormat::Float16_b,
+        .data_format = DataFormat::Float32,
     };*/
 
     uint32_t pattern_l1_write_addr_in1 = get_write_ptr(pattern_cb_id1);
@@ -33,7 +32,7 @@ void kernel_main()
     const InterleavedAddrGenFast<true> sparse_src_buf = {
         .bank_base_address = sparse_dram_addr,          // The base address of the buffer
         .page_size = sparse_tile_size,         // The size of a buffer page
-        .data_format = DataFormat::Float16_b, // The data format of the buffer
+        .data_format = DataFormat::Float32, // The data format of the buffer
     };
 
     for(uint32_t tile_id = core_id*num_output_tiles_per_core; tile_id < (core_id*num_output_tiles_per_core+num_output_tiles_per_core); tile_id++) {

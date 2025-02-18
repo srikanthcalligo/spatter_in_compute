@@ -7,18 +7,19 @@
 
 #include "Configuration.hh"
 
-#include "tt_metal/host_api.hpp"
-#include "tt_metal/common/constants.hpp"
-#include "tt_metal/detail/util.hpp"
-#include "tt_metal/impl/device/device.hpp"
-#include "tt_metal/common/work_split.hpp"
-#include "tt_metal/common/bfloat16.hpp"
-#include "tt_metal/common/test_tiles.hpp"
-#include "tt_metal/impl/dispatch/command_queue.hpp"
-#include "tt_metal/common/work_split.hpp"
+#include <tt-metalium/host_api.hpp>
+//#include "tt_metal/host_api.hpp"
+#include "tt-metalium/constants.hpp"
+#include "tt-metalium/util.hpp"
+#include "tt-metalium/device.hpp"
+#include "tt-metalium/work_split.hpp"
+#include "tt-metalium/bfloat16.hpp"
+#include "tt-metalium/test_tiles.hpp"
+#include "tt-metalium/command_queue.hpp"
 //#include "tt_metal/programming_examples/matmul_common/bmm_op.hpp"
-#include "tt_metal/common/tilize_untilize.hpp"
+#include "tt-metalium/tilize_untilize.hpp"
 //#include "tt_metal/impl/device/device.hpp"
+#include <stdlib.h>
 
 
 using namespace tt::constants;
@@ -436,16 +437,434 @@ Configuration<Spatter::Serial>::Configuration(const size_t id,
 
 void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
   size_t pattern_length = pattern.size();
+  int input_run = 0;
+
+  if(strcmp(getenv("TT_SPATTER_FLOAT_VERSION_SERIAL") != NULL ? getenv("TT_SPATTER_FLOAT_VERSION_SERIAL") : "0" , "1") == 0){
+    input_run = 1;
+  }else if(strcmp(getenv("TT_SPATTER_FLOAT_VERSION_PARALLEL") != NULL ? getenv("TT_SPATTER_FLOAT_VERSION_PARALLEL") : "0" , "1") == 0){
+    input_run = 2;
+  }else if(strcmp(getenv("TT_SPATTER_BFLOAT16_VERSION_SERIAL") != NULL ? getenv("TT_SPATTER_BFLOAT16_VERSION_SERIAL") : "0" , "1") == 0){
+    input_run = 3;
+  }else if(strcmp(getenv("TT_SPATTER_BFLOAT16_VERSION_PARALLEL") != NULL ? getenv("TT_SPATTER_BFLOAT16_VERSION_PARALLEL") : "0" , "1") == 0){
+    input_run = 4;
+  }
+
 
 #ifdef USE_MPI
   MPI_Barrier(MPI_COMM_WORLD);
 #endif
 
 //Compute Kernel version
-#ifdef TT_SPATTER_ENABLE
+//TT_SPATTER_FLOAT_VERSION_SERIAL
+if(input_run == 1) {
     constexpr CoreCoord core = {0,0};
     constexpr uint32_t device_id = 0; 
-    Device *device = CreateDevice(device_id);
+    IDevice *device = CreateDevice(device_id);
+    CommandQueue& cq = device->command_queue();
+    Program program  = CreateProgram();
+    uint32_t single_tile_size = 32 * 32;
+    uint32_t n_tiles = sparse.size() / single_tile_size;
+    uint32_t n_tiles_rem = (sparse.size() % single_tile_size) > 0 ? 1 : 0;
+    if(n_tiles_rem > 0){
+      n_tiles = n_tiles + 1;
+    }
+    uint32_t sparse_buf_size = sizeof(float) * single_tile_size * n_tiles;
+    uint32_t dense_buf_size = sizeof(float) * single_tile_size;
+    uint32_t sparse_buf_page_size = sizeof(float) * single_tile_size;
+    uint32_t dense_buf_page_size = sizeof(float) * single_tile_size;
+
+    uint32_t pattern_buf_size = sizeof(float) * single_tile_size;
+    uint32_t pattern_buf_page_size = sizeof(float) * single_tile_size;
+
+    printf("Total No.of Tiles = %u Count = %zu\n", n_tiles, count);
+    
+    tt_metal::BufferConfig buffer_config_sparse = {
+            .device = device,
+            .size = sparse_buf_size ,
+            .page_size = sparse_buf_page_size,
+            .buffer_type = tt_metal::BufferType::DRAM
+    };
+
+    tt_metal::BufferConfig buffer_config_pattern = {
+            .device = device,
+            .size = pattern_buf_size,
+            .page_size = pattern_buf_page_size,
+            .buffer_type = tt_metal::BufferType::DRAM
+    };
+
+    tt_metal::BufferConfig buffer_config_dense = {
+            .device = device,
+            .size = dense_buf_size,
+            .page_size = dense_buf_page_size,
+            .buffer_type = tt_metal::BufferType::DRAM
+    };
+
+    std::shared_ptr<tt::tt_metal::Buffer> dram_buffer_sparse = CreateBuffer(buffer_config_sparse);
+    std::shared_ptr<tt::tt_metal::Buffer> dram_buffer_pattern = CreateBuffer(buffer_config_pattern);
+    std::shared_ptr<tt::tt_metal::Buffer> dram_buffer_dense = CreateBuffer(buffer_config_dense);
+
+    //auto src0_coord =  dram_buffer_sparse->noc_coordinates();
+    //auto src1_coord = dram_buffer_pattern->noc_coordinates();
+    //auto dst_coord = dram_buffer_dense->noc_coordinates();
+
+    //Create circular buffer to move data from DRAM to L1
+    constexpr uint32_t src0_cb_index = tt::CB::c_in0;
+
+    uint32_t num_tiles_per_cb = 1;
+    uint32_t buf_src0 = num_tiles_per_cb * sparse_buf_page_size;
+    CircularBufferConfig cb0_src0_config = CircularBufferConfig(
+        buf_src0,
+        {{src0_cb_index, tt::DataFormat::Float32}}).set_page_size(src0_cb_index, sparse_buf_page_size);
+    
+    CBHandle cb_src0 = tt_metal::CreateCircularBuffer(
+        program,
+        core,
+        cb0_src0_config);
+
+
+    constexpr uint32_t src1_cb_index = tt::CB::c_in1;
+
+    CircularBufferConfig cb1_src1_config = CircularBufferConfig(
+        buf_src0,
+        {{src1_cb_index, tt::DataFormat::Float32}}).set_page_size(src1_cb_index, pattern_buf_page_size);
+
+    CBHandle cb_id1 = tt_metal::CreateCircularBuffer(
+        program,
+        core,
+        cb1_src1_config
+    );
+
+    constexpr uint32_t dst_cb_index = tt::CB::c_out0;
+
+    CircularBufferConfig cb_dst_config = CircularBufferConfig(
+        buf_src0,
+        {{dst_cb_index, tt::DataFormat::Float32}}).set_page_size(dst_cb_index, dense_buf_page_size);
+
+    CBHandle cb_out = tt_metal::CreateCircularBuffer(
+        program,
+        core,
+        cb_dst_config
+    );
+
+    //Create datamovement kernels
+    KernelHandle void_data_kernel_noc0_read = CreateKernel(
+                    program,
+                    "tt_metal/programming_examples/spatter_in_compute/src/Spatter/kernels/data/gather_read_kernel_compute_32b.cpp",
+                    core,
+                    DataMovementConfig{.processor = DataMovementProcessor::RISCV_0, .noc = NOC::RISCV_0_default});
+
+
+    KernelHandle void_data_kernel_noc1_write = CreateKernel(
+                    program,
+                    "tt_metal/programming_examples/spatter_in_compute/src/Spatter/kernels/data/gather_write_kernel_compute_32b.cpp",
+                    core,
+                    DataMovementConfig{.processor = DataMovementProcessor::RISCV_1, .noc = NOC::RISCV_1_default});
+    
+
+    /* Set the parameters that the compute kernel will use */
+    std::vector<uint32_t> compute_kernel_args = {};
+
+    /* Use the add_tiles operation in the compute kernel */
+    KernelHandle eltwise_binary_kernel_id = CreateKernel(
+        program,
+        "tt_metal/programming_examples/spatter_in_compute/src/Spatter/kernels/compute/gather_compute_kernel_32b.cpp",
+        core,
+        ComputeConfig{
+            .math_fidelity = MathFidelity::HiFi4,
+            .fp32_dest_acc_en = true,
+            .math_approx_mode = false,
+            .compile_args = compute_kernel_args,
+        }
+    );
+    //Declare pattern and sparse arrays
+    std::vector<uint32_t> sparse_vec(single_tile_size * n_tiles);
+    std::vector<uint32_t> pattern_mat_val(single_tile_size);
+    
+    for(uint32_t i=0; i < sparse.size() ; i++){
+      sparse_vec[i] = (float)sparse[i];
+    }
+    uint32_t stride_len = pattern[1];
+    float in_val = 0;
+
+    for(int i=0; i < single_tile_size ; i++){
+      pattern_mat_val[i] = (uint32_t)in_val;
+    }
+
+    EnqueueWriteBuffer(cq, dram_buffer_sparse, sparse_vec, false);
+    EnqueueWriteBuffer(cq, dram_buffer_pattern, pattern_mat_val, false);
+
+    SetRuntimeArgs(program, void_data_kernel_noc0_read, core, {dram_buffer_sparse->address(), dram_buffer_pattern->address(), n_tiles});
+    SetRuntimeArgs(program, eltwise_binary_kernel_id, core, {n_tiles});
+    SetRuntimeArgs(program, void_data_kernel_noc1_write, core, {dram_buffer_dense->address(), 1}); //Return only the final tile
+
+    if (timed)
+      timer.start();
+    
+    EnqueueProgram(cq, program, false);
+
+    Finish(cq);
+    if (timed) {
+      timer.stop();
+      time_seconds[run_id] = timer.seconds();
+      timer.clear();
+    }
+
+    std::vector<uint32_t> dense_vec(single_tile_size);
+    EnqueueReadBuffer(cq, dram_buffer_dense, dense_vec, true);
+
+#ifdef PRINT_DEBUG
+    printf("Dense_size = %zu pattern_size = %zu sparse_size = %zu\n",dense_vec.size(), pattern_mat_val.size(), sparse_vec.size());
+    printf("TT Input : \n");
+    for(uint32_t i= sparse.size() - (pattern_length * stride_len); i < sparse.size(); i = i+stride_len){
+      printf("%f ", (float)sparse_vec[i]);
+    }
+    printf("\n");
+    printf("TT Result : \n");
+    if(n_tiles_rem > 0){
+      for(uint32_t i= 0; i < sparse.size() % single_tile_size; i = i+stride_len){
+        printf("%f ", (float)dense_vec[i]);
+      }
+    }
+    else {
+      for(uint32_t i= (dense_vec.size()) - pattern_length; i < dense_vec.size(); i = i+stride_len){
+        printf("%f ", (float)dense_vec[i]);
+      }
+    }
+    printf("\n\n");
+
+    printf("Host Result : \n");
+
+    for (size_t i = 0; i < count; ++i){
+    for (size_t j = 0; j < pattern_length; ++j){
+      dense[j + pattern_length * (i % wrap)] = sparse[pattern[j] + delta * i];
+      if(i == count - 1){
+        printf("%f ", dense[j + pattern_length * (i % wrap)]);
+      }
+    }
+  }
+#endif
+    CloseDevice(device);
+
+}else if(input_run == 2) { //TT_SPATTER_FLOAT_VERSION_PARALLEL
+    constexpr uint32_t device_id = 0; 
+    IDevice *device = CreateDevice(device_id);
+    CommandQueue& cq = device->command_queue();
+    Program program  = CreateProgram();
+
+    /*
+    * Multi-Core prep
+    */
+    auto compute_with_storage_grid_size = device->compute_with_storage_grid_size();
+    //auto compute_with_storage_grid_size = device->grid_size();
+    uint32_t num_cores_x = compute_with_storage_grid_size.x;
+    uint32_t num_cores_y = compute_with_storage_grid_size.y;
+
+    constexpr CoreCoord core = {0,0};
+    uint32_t single_tile_size = 32 * 32;
+    uint32_t n_tiles = (count * pattern_length)/ single_tile_size; //1024 = 32 * 32
+    uint32_t n_tiles_rem = (sparse.size() % single_tile_size) > 0 ? 1 : 0;
+    if(n_tiles_rem > 0){
+      n_tiles = n_tiles + 1;
+    }
+    uint32_t buf_size = sizeof(float) * single_tile_size * n_tiles;
+    
+    auto [num_cores, all_cores, core_group_1, core_group_2, num_output_tiles_per_core_group_1, num_output_tiles_per_core_group_2] = split_work_to_cores(compute_with_storage_grid_size, n_tiles);
+
+    uint32_t dest_buf_size = sizeof(float) * num_cores * single_tile_size; // num_cores
+    uint32_t buf_page_size = sizeof(float) * single_tile_size;
+    uint32_t pattern_buf_size = sizeof(float) * single_tile_size;
+
+    std::cout << "No.of Tiles = " << n_tiles << "  No.of Cores = " << num_cores << std::endl;
+
+    //std::cout << core_group_1.num_cores() << std::endl;
+    //std::cout << core_group_2.num_cores() << std::endl;
+    //std::cout << num_output_tiles_per_core_group_1 << std::endl;
+    //std::cout << num_output_tiles_per_core_group_2 << std::endl;
+
+    tt_metal::BufferConfig buffer_config_a = {
+            .device = device,
+            .size = buf_size ,
+            .page_size = buf_page_size,
+            .buffer_type = tt_metal::BufferType::DRAM
+    };
+
+    tt_metal::BufferConfig buffer_config_b = {
+            .device = device,
+            .size = pattern_buf_size,
+            .page_size = pattern_buf_size,
+            .buffer_type = tt_metal::BufferType::DRAM
+    };
+
+    tt_metal::BufferConfig buffer_config_c = {
+            .device = device,
+            .size = dest_buf_size,
+            .page_size = buf_page_size,
+            .buffer_type = tt_metal::BufferType::DRAM
+    };
+
+    std::shared_ptr<tt::tt_metal::Buffer> dram_buffer = CreateBuffer(buffer_config_a);
+    std::shared_ptr<tt::tt_metal::Buffer> dram_buffer1 = CreateBuffer(buffer_config_b);
+    std::shared_ptr<tt::tt_metal::Buffer> dram_buffer2 = CreateBuffer(buffer_config_c);
+
+    //Create circular buffer to move data from DRAM to L1
+
+    constexpr uint32_t src0_cb_index = tt::CBIndex::c_0;
+
+    uint32_t num_tiles_per_cb = 1;
+    uint32_t buf_src0 = num_tiles_per_cb * buf_page_size;
+    CircularBufferConfig cb0_src0_config = CircularBufferConfig(
+        num_tiles_per_cb * buf_page_size,
+        {{src0_cb_index, tt::DataFormat::Float32}}).set_page_size(src0_cb_index, buf_page_size);
+    
+    CBHandle cb_src0 = tt_metal::CreateCircularBuffer(
+        program,
+        all_cores,
+        cb0_src0_config);
+
+
+    constexpr uint32_t src1_cb_index = tt::CBIndex::c_1;
+
+    CircularBufferConfig cb1_src1_config = CircularBufferConfig(
+        num_tiles_per_cb * pattern_buf_size,
+        {{src1_cb_index, tt::DataFormat::Float32}}).set_page_size(src1_cb_index, pattern_buf_size);
+
+    CBHandle cb_id1 = tt_metal::CreateCircularBuffer(
+        program,
+        all_cores,
+        cb1_src1_config
+    );
+
+    constexpr uint32_t dst_cb_index = tt::CBIndex::c_2;
+
+    CircularBufferConfig cb_dst_config = CircularBufferConfig(
+        num_tiles_per_cb * dest_buf_size,
+        {{dst_cb_index, tt::DataFormat::Float32}}).set_page_size(dst_cb_index, buf_page_size);
+
+    CBHandle cb_out = tt_metal::CreateCircularBuffer(
+        program,
+        all_cores,
+        cb_dst_config
+    );
+
+    //Create datamovement kernels
+    KernelHandle void_data_kernel_noc0_read = CreateKernel(
+                    program,
+                    "tt_metal/programming_examples/spatter_in_compute/src/Spatter/kernels/data/gather_read_kernel_compute_mc_32b.cpp",
+                    all_cores,
+                    DataMovementConfig{.processor = DataMovementProcessor::RISCV_0, .noc = NOC::RISCV_0_default});
+
+
+    KernelHandle void_data_kernel_noc1_write = CreateKernel(
+                    program,
+                    "tt_metal/programming_examples/spatter_in_compute/src/Spatter/kernels/data/gather_write_kernel_compute_mc_32b.cpp",
+                    all_cores,
+                    DataMovementConfig{.processor = DataMovementProcessor::RISCV_1, .noc = NOC::RISCV_1_default});
+    
+
+    /* Set the parameters that the compute kernel will use */
+    std::vector<uint32_t> compute_kernel_args = {};
+
+    /* Use the add_tiles operation in the compute kernel */
+    KernelHandle eltwise_binary_kernel_id = CreateKernel(
+        program,
+        "tt_metal/programming_examples/spatter_in_compute/src/Spatter/kernels/compute/gather_compute_kernel_mc.cpp",
+        all_cores,
+        ComputeConfig{
+            .math_fidelity = MathFidelity::HiFi4,
+            .fp32_dest_acc_en = true,
+            .math_approx_mode = false,
+            .compile_args = compute_kernel_args,
+        }
+    );
+    //Input pattern and sparse arrary
+    std::vector<uint32_t> sparse_vec(n_tiles * single_tile_size);
+    std::vector<uint32_t> pattern_mat_val(single_tile_size);
+    
+    for(uint32_t i=0; i < sparse.size() ; i++){
+      sparse_vec[i] =  (float)sparse[i];
+    }
+
+    uint32_t stride_len = pattern[1];
+    float in_val = 0;
+
+    for(int i=0; i < single_tile_size ; i++){
+      pattern_mat_val[i] = (uint32_t)in_val;
+    }
+    EnqueueWriteBuffer(cq, dram_buffer, sparse_vec, false);
+    EnqueueWriteBuffer(cq, dram_buffer1, pattern_mat_val, false);
+
+    for (uint32_t i = 0, num_tiles_written = 0; i < num_cores; i++){
+ 
+        CoreCoord core = {i / num_cores_y, i % num_cores_y};
+
+        uint32_t num_output_tiles_per_core = 0;
+        if (core_group_1.contains(core)) {
+        num_output_tiles_per_core = num_output_tiles_per_core_group_1;
+        } else if (core_group_2.contains(core)) {
+            num_output_tiles_per_core = num_output_tiles_per_core_group_2;
+        } else {
+            TT_ASSERT(false, "Core not in specified core ranges");
+        }
+        SetRuntimeArgs(program,
+         void_data_kernel_noc0_read,
+         core,
+         {dram_buffer->address(),
+         dram_buffer1->address(),
+         n_tiles,
+         num_tiles_written,
+         num_output_tiles_per_core, 
+         i});
+
+        SetRuntimeArgs(program, eltwise_binary_kernel_id, core, {n_tiles, num_tiles_written, num_output_tiles_per_core, i, num_cores});
+        SetRuntimeArgs(program, void_data_kernel_noc1_write, core, {dram_buffer2->address(), n_tiles, num_tiles_written, num_output_tiles_per_core, i, num_cores});
+        num_tiles_written += num_output_tiles_per_core;
+    }
+
+    if (timed)
+      timer.start();
+    
+    EnqueueProgram(cq, program, false);
+
+    Finish(cq);
+
+    if (timed) {
+      timer.stop();
+      time_seconds[run_id] = timer.seconds();
+      timer.clear();
+    }
+    //Output data
+    std::vector<uint32_t> dense_vec(single_tile_size * num_cores);
+    EnqueueReadBuffer(cq, dram_buffer2, dense_vec, true);
+
+#ifdef PRINT_DEBUG  
+    printf("Dense_size = %zu pattern_size = %zu sparse_size = %zu\n",dense_vec.size(), pattern_mat_val.size(), sparse_vec.size());
+    
+    printf("TT Input : \n");
+    for(uint32_t i= sparse.size() - (pattern_length * stride_len); i < sparse.size(); i = i+stride_len){
+      printf("%f ", (float)sparse_vec[i]);
+    }
+
+    printf("\n");
+    printf("TT Result : \n");
+    //if(n_tiles_rem > 0){
+    //  for(uint32_t i= (dense_vec.size() * 2) - 512; i < dense_vec.size() * 2 - 20; i = i+stride_len){
+    //    printf("%f ", c_bf16[i].to_float());
+    //  }
+    // }
+    //else {
+      for(uint32_t i= dense_vec.size() - pattern_length; i < dense_vec.size(); i = i+stride_len){
+        printf("%f ", (float)dense_vec[i]);
+      }  
+    //}
+    printf("\n\n");
+#endif
+    CloseDevice(device);
+
+
+}else if(input_run == 3){ //TT_SPATTER_BFLOAT16_VERSION_SERIAL
+    constexpr CoreCoord core = {0,0};
+    constexpr uint32_t device_id = 0; 
+    IDevice *device = CreateDevice(device_id);
     CommandQueue& cq = device->command_queue();
     Program program  = CreateProgram();
     uint32_t single_tile_size = 32 * 32;
@@ -489,12 +908,8 @@ void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
     std::shared_ptr<tt::tt_metal::Buffer> dram_buffer_pattern = CreateBuffer(buffer_config_pattern);
     std::shared_ptr<tt::tt_metal::Buffer> dram_buffer_dense = CreateBuffer(buffer_config_dense);
 
-    auto src0_coord =  dram_buffer_sparse->noc_coordinates();
-    auto src1_coord = dram_buffer_pattern->noc_coordinates();
-    auto dst_coord = dram_buffer_dense->noc_coordinates();
-
     //Create circular buffer to move data from DRAM to L1
-    constexpr uint32_t src0_cb_index = CB::c_in0;
+    constexpr uint32_t src0_cb_index = tt::CBIndex::c_0;
 
     uint32_t num_tiles_per_cb = 1;
     uint32_t buf_src0 = num_tiles_per_cb * sparse_buf_page_size;
@@ -508,7 +923,7 @@ void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
         cb0_src0_config);
 
 
-    constexpr uint32_t src1_cb_index = tt::CB::c_in1;
+    constexpr uint32_t src1_cb_index = tt::CBIndex::c_1;
 
     CircularBufferConfig cb1_src1_config = CircularBufferConfig(
         buf_src0,
@@ -520,7 +935,7 @@ void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
         cb1_src1_config
     );
 
-    constexpr uint32_t dst_cb_index = tt::CB::c_out0;
+    constexpr uint32_t dst_cb_index = tt::CBIndex::c_2;
 
     CircularBufferConfig cb_dst_config = CircularBufferConfig(
         buf_src0,
@@ -548,7 +963,7 @@ void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
     
 
     /* Set the parameters that the compute kernel will use */
-    vector<uint32_t> compute_kernel_args = {};
+    std::vector<uint32_t> compute_kernel_args = {};
 
     /* Use the add_tiles operation in the compute kernel */
     KernelHandle eltwise_binary_kernel_id = CreateKernel(
@@ -563,37 +978,24 @@ void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
         }
     );
     //Declare pattern and sparse arrays
-    std::vector<uint32_t> sparse_vec(single_tile_size * n_tiles);
-    std::vector<uint32_t> pattern_mat_val(single_tile_size);
-    
-    for(uint32_t i=0, j = 0; i < sparse.size() ; i=i+2, j++){
-      bfloat16 num_1_bfloat16 = bfloat16((float)sparse[i]);
-      bfloat16 num_2_bfloat16 = bfloat16((float)sparse[i+1]);
-      sparse_vec.at(j) = pack_two_bfloat16_into_uint32(std::pair<bfloat16, bfloat16>(num_1_bfloat16, num_2_bfloat16));
+    std::vector<bfloat16> sparse_vec(single_tile_size * n_tiles);
+    std::vector<bfloat16> pattern_mat_val(single_tile_size);
+
+    for(uint32_t i=0; i < sparse.size() ; i++){
+      sparse_vec[i] = bfloat16((float)sparse[i]);
     }
     uint32_t stride_len = pattern[1];
     float in_val = 0;
-    //float in_val1 = 1;
-    bfloat16 num_1_bfloat16, num_2_bfloat16;
-
-    for(int i=0 , j=0; i < single_tile_size ; i=i+stride_len, j++){
-      //if(stride_len == 1){
-        num_1_bfloat16 = bfloat16(in_val);
-        num_2_bfloat16 = bfloat16(in_val);
-      //}
-      //if(stride_len == 2){
-      //  num_1_bfloat16 = bfloat16(in_val1);
-      //  num_2_bfloat16 = bfloat16(in_val);
-      //}
-      pattern_mat_val.at(j) = pack_two_bfloat16_into_uint32(std::pair<bfloat16, bfloat16>(num_1_bfloat16, num_2_bfloat16));
+    for(int i=0; i < single_tile_size ; i++){
+      pattern_mat_val[i] = bfloat16(in_val);
     }
 
     EnqueueWriteBuffer(cq, dram_buffer_sparse, sparse_vec, false);
     EnqueueWriteBuffer(cq, dram_buffer_pattern, pattern_mat_val, false);
 
-    SetRuntimeArgs(program, void_data_kernel_noc0_read, core, {dram_buffer_sparse->address(), dram_buffer_pattern->address(),src0_coord.x, src0_coord.y, src1_coord.x, src1_coord.y, n_tiles, pattern_length, delta, wrap});
+    SetRuntimeArgs(program, void_data_kernel_noc0_read, core, {dram_buffer_sparse->address(), dram_buffer_pattern->address(), n_tiles});
     SetRuntimeArgs(program, eltwise_binary_kernel_id, core, {n_tiles});
-    SetRuntimeArgs(program, void_data_kernel_noc1_write, core, {dram_buffer_dense->address(), dst_coord.x, dst_coord.y, 1}); //Return only the final tile
+    SetRuntimeArgs(program, void_data_kernel_noc1_write, core, {dram_buffer_dense->address(), 1}); //Return only the final tile
 
     if (timed)
       timer.start();
@@ -607,41 +1009,44 @@ void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
       timer.clear();
     }
 
-    vector<uint32_t> dense_vec(single_tile_size);
+    std::vector<bfloat16> dense_vec(single_tile_size);
     EnqueueReadBuffer(cq, dram_buffer_dense, dense_vec, true);
 
+    CloseDevice(device);
+
 #ifdef PRINT_DEBUG
-    bfloat16* a_bf16 = reinterpret_cast<bfloat16*>(sparse_vec.data());
-    bfloat16* b_bf16 = reinterpret_cast<bfloat16*>(pattern_mat_val.data());
-    bfloat16* c_bf16 = reinterpret_cast<bfloat16*>(dense_vec.data());
-    
     printf("Dense_size = %zu pattern_size = %zu sparse_size = %zu\n",dense_vec.size(), pattern_mat_val.size(), sparse_vec.size());
-    
-    printf("Input = \n");
+    printf("TT Input : \n");
     for(uint32_t i= sparse.size() - (pattern_length * stride_len); i < sparse.size(); i = i+stride_len){
-      printf("%f ", a_bf16[i].to_float());
+      printf("%f ", sparse_vec[i].to_float());
     }
-    printf("\n");
-    printf("Result = \n");
+    printf("\n\n");
+    printf("TT Result : \n");
     if(n_tiles_rem > 0){
       for(uint32_t i= 0; i < sparse.size() % single_tile_size; i = i+stride_len){
-        printf("%f ", c_bf16[i].to_float());
+        printf("%f ", dense_vec[i].to_float());
       }
     }
     else {
-      for(uint32_t i= (dense_vec.size() * 2) - pattern_length; i < dense_vec.size() * 2; i = i+stride_len){
-        printf("%f ", c_bf16[i].to_float());
+      for(uint32_t i= dense_vec.size() - pattern_length; i < dense_vec.size(); i = i+stride_len){
+        printf("%f ", dense_vec[i].to_float());
       }
     }
     printf("\n\n");
+    printf("Host Result : \n");
+    for (size_t i = 0; i < count; ++i){
+    for (size_t j = 0; j < pattern_length; ++j){
+      dense[j + pattern_length * (i % wrap)] = sparse[pattern[j] + delta * i];
+      if(i == count - 1){
+        printf("%f ", dense[j + pattern_length * (i % wrap)]);
+      }
+    }
+  }
 #endif
-    CloseDevice(device);
-    
-#else
 
-#ifdef TT_SPATTER_PARALLEL_ENABLE
+}else if(input_run == 4){ //TT_SPATTER_BFLOAT16_VERSION_PARALLEL
     constexpr uint32_t device_id = 0; 
-    Device *device = CreateDevice(device_id);
+    IDevice *device = CreateDevice(device_id);
     CommandQueue& cq = device->command_queue();
     Program program  = CreateProgram();
 
@@ -666,16 +1071,15 @@ void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
 
     uint32_t dest_buf_size = sizeof(bfloat16) * num_cores * single_tile_size; // num_cores
     uint32_t buf_page_size = sizeof(bfloat16) * single_tile_size;
-    uint32_t pattern_buf_size = sizeof(bfloat16) * 1024;
+    uint32_t pattern_buf_size = sizeof(bfloat16) * single_tile_size;
 
-    std::cout << "No.of Cores = " << num_cores << std::endl;
+    std::cout << "No.of Tiles = " << n_tiles << "  No.of Cores = " << num_cores << std::endl;
 
     //std::cout << core_group_1.num_cores() << std::endl;
     //std::cout << core_group_2.num_cores() << std::endl;
-    if(core_group_2.num_cores() > 0){
-      printf("Core group2 Error.  TBD\n");
-      exit(0);
-    }
+    //std::cout << num_output_tiles_per_core_group_1 << std::endl;
+    //std::cout << num_output_tiles_per_core_group_2 << std::endl;
+
     tt_metal::BufferConfig buffer_config_a = {
             .device = device,
             .size = buf_size ,
@@ -701,13 +1105,9 @@ void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
     std::shared_ptr<tt::tt_metal::Buffer> dram_buffer1 = CreateBuffer(buffer_config_b);
     std::shared_ptr<tt::tt_metal::Buffer> dram_buffer2 = CreateBuffer(buffer_config_c);
 
-    auto src0_coord =  dram_buffer->noc_coordinates();
-    auto src1_coord = dram_buffer1->noc_coordinates();
-    auto dst_coord = dram_buffer2->noc_coordinates();
-
     //Create circular buffer to move data from DRAM to L1
 
-    constexpr uint32_t src0_cb_index = CB::c_in0;
+    constexpr uint32_t src0_cb_index = tt::CBIndex::c_0;
 
     uint32_t num_tiles_per_cb = 1;
     uint32_t buf_src0 = num_tiles_per_cb * buf_page_size;
@@ -721,7 +1121,7 @@ void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
         cb0_src0_config);
 
 
-    constexpr uint32_t src1_cb_index = tt::CB::c_in1;
+    constexpr uint32_t src1_cb_index = tt::CBIndex::c_1;
 
     CircularBufferConfig cb1_src1_config = CircularBufferConfig(
         num_tiles_per_cb * pattern_buf_size,
@@ -733,8 +1133,7 @@ void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
         cb1_src1_config
     );
 
-
-    constexpr uint32_t dst_cb_index = tt::CB::c_out0;
+    constexpr uint32_t dst_cb_index = tt::CBIndex::c_2;
 
     CircularBufferConfig cb_dst_config = CircularBufferConfig(
         num_tiles_per_cb * dest_buf_size,
@@ -762,7 +1161,7 @@ void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
     
 
     /* Set the parameters that the compute kernel will use */
-    vector<uint32_t> compute_kernel_args = {};
+    std::vector<uint32_t> compute_kernel_args = {};
 
     /* Use the add_tiles operation in the compute kernel */
     KernelHandle eltwise_binary_kernel_id = CreateKernel(
@@ -777,32 +1176,18 @@ void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
         }
     );
     //Input pattern and sparse arrary
-    std::vector<uint32_t> sparse_vec(sparse.size());
-    std::vector<uint32_t> pattern_mat_val(single_tile_size);
+    std::vector<bfloat16> sparse_vec(n_tiles * single_tile_size);
+    std::vector<bfloat16> pattern_mat_val(single_tile_size);
     
-    for(uint32_t i=0, j = 0; i < sparse.size() ; i=i+2, j++){
-      bfloat16 num_1_bfloat16 = bfloat16((float)sparse[i]);
-      bfloat16 num_2_bfloat16 = bfloat16((float)sparse[i+1]);
-      sparse_vec.at(j) = pack_two_bfloat16_into_uint32(std::pair<bfloat16, bfloat16>(num_1_bfloat16, num_2_bfloat16));
+    for(uint32_t i=0; i < sparse.size() ; i++){
+      sparse_vec[i] =  bfloat16((float)sparse[i]);
     }
 
     uint32_t stride_len = pattern[1];
     float in_val = 0;
-    float in_val1 = 1;
-    bfloat16 num_1_bfloat16, num_2_bfloat16;
 
-    for(int i=0 , j=0; i < 1024 ; i=i+stride_len, j++){
-      if(stride_len == 1){
-        num_1_bfloat16 = bfloat16(in_val1);
-        num_2_bfloat16 = bfloat16(in_val1);
-        pattern_mat_val.at(j) = pack_two_bfloat16_into_uint32(std::pair<bfloat16, bfloat16>(num_1_bfloat16, num_2_bfloat16));
-
-      }
-      if(stride_len == 2){
-        num_1_bfloat16 = bfloat16(in_val1);
-        num_2_bfloat16 = bfloat16(in_val);
-        pattern_mat_val.at(j) = pack_two_bfloat16_into_uint32(std::pair<bfloat16, bfloat16>(num_1_bfloat16, num_2_bfloat16));
-      }
+    for(int i=0; i < single_tile_size ; i++){
+      pattern_mat_val[i] = bfloat16(in_val);
     }
     EnqueueWriteBuffer(cq, dram_buffer, sparse_vec, false);
     EnqueueWriteBuffer(cq, dram_buffer1, pattern_mat_val, false);
@@ -812,32 +1197,25 @@ void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
         CoreCoord core = {i / num_cores_y, i % num_cores_y};
 
         uint32_t num_output_tiles_per_core = 0;
-        //if (core_group_1.contains(core)) {
+        if (core_group_1.contains(core)) {
         num_output_tiles_per_core = num_output_tiles_per_core_group_1;
-        //} else if (core_group_2.contains(core)) {
-        //    num_output_tiles_per_core = num_output_tiles_per_core_group_2;
-        //} else {
-        //    TT_ASSERT(false, "Core not in specified core ranges");
-        //}
+        } else if (core_group_2.contains(core)) {
+            num_output_tiles_per_core = num_output_tiles_per_core_group_2;
+        } else {
+            TT_ASSERT(false, "Core not in specified core ranges");
+        }
         SetRuntimeArgs(program,
          void_data_kernel_noc0_read,
          core,
          {dram_buffer->address(),
          dram_buffer1->address(),
-         src0_coord.x,
-         src0_coord.y,
-         src1_coord.x,
-         src1_coord.y,
          n_tiles,
-         pattern_length,
-         delta,
-         wrap,
          num_tiles_written,
          num_output_tiles_per_core, 
          i});
 
         SetRuntimeArgs(program, eltwise_binary_kernel_id, core, {n_tiles, num_tiles_written, num_output_tiles_per_core, i, num_cores});
-        SetRuntimeArgs(program, void_data_kernel_noc1_write, core, {dram_buffer2->address(), dst_coord.x, dst_coord.y, n_tiles, num_tiles_written, num_output_tiles_per_core, i, num_cores});
+        SetRuntimeArgs(program, void_data_kernel_noc1_write, core, {dram_buffer2->address(), n_tiles, num_tiles_written, num_output_tiles_per_core, i, num_cores});
         num_tiles_written += num_output_tiles_per_core;
     }
 
@@ -848,47 +1226,42 @@ void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
 
     Finish(cq);
 
-    //printf("Hello, device 0, handle the data\n");
-
-    std::vector<uint32_t> dense_vec(1024 * num_cores);
-    EnqueueReadBuffer(cq, dram_buffer2, dense_vec, true);
     if (timed) {
       timer.stop();
       time_seconds[run_id] = timer.seconds();
       timer.clear();
     }
 
-#ifdef PRINT_DEBUG
-    //printf("Final : \n");
-    bfloat16* a_bf16 = reinterpret_cast<bfloat16*>(sparse_vec.data());
-    bfloat16* b_bf16 = reinterpret_cast<bfloat16*>(pattern_mat_val.data());
-    bfloat16* c_bf16 = reinterpret_cast<bfloat16*>(dense_vec.data());
-    
+    //Output data
+    std::vector<bfloat16> dense_vec(single_tile_size * num_cores);
+    EnqueueReadBuffer(cq, dram_buffer2, dense_vec, true);
+
+#ifdef PRINT_DEBUG  
     printf("Dense_size = %zu pattern_size = %zu sparse_size = %zu\n",dense_vec.size(), pattern_mat_val.size(), sparse_vec.size());
     
-    printf("Input = \n");
+    printf("TT Input : \n");
     for(uint32_t i= sparse.size() - (pattern_length * stride_len); i < sparse.size(); i = i+stride_len){
-      printf("%f ", a_bf16[i].to_float());
+      printf("%f ", sparse_vec[i].to_float());
     }
 
     printf("\n");
-    printf("Result = \n");
-    if(n_tiles_rem > 0){
-      for(uint32_t i= 0; i < sparse.size() % single_tile_size; i = i+stride_len){
-        printf("%f ", c_bf16[i].to_float());
-      }
-    }
-    else {
-      for(uint32_t i= (dense_vec.size() * 2) - pattern_length; i < dense_vec.size() * 2; i = i+stride_len){
-        printf("%f ", c_bf16[i].to_float());
+    printf("TT Result : \n");
+    //if(n_tiles_rem > 0){
+    //  for(uint32_t i= (dense_vec.size() * 2) - 512; i < dense_vec.size() * 2 - 20; i = i+stride_len){
+    //    printf("%f ", c_bf16[i].to_float());
+    //  }
+    // }
+    //else {
+      for(uint32_t i= dense_vec.size() - (pattern_length * stride_len); i < dense_vec.size(); i = i+stride_len){
+        printf("%f ", dense_vec[i].to_float());
       }  
-    }
+    //}
     printf("\n\n");
 #endif
     CloseDevice(device);
 
 //Host Code
-#else
+}else {
 
   if (timed)
     timer.start();
@@ -903,29 +1276,430 @@ void Configuration<Spatter::Serial>::gather(bool timed, unsigned long run_id) {
     time_seconds[run_id] = timer.seconds();
     timer.clear();
   }
-#endif
-#endif
+
+}
 }
 
 void Configuration<Spatter::Serial>::scatter(bool timed, unsigned long run_id) {
   size_t pattern_length = pattern.size();
 
+  int input_run = 0;
+  if(strcmp(getenv("TT_SPATTER_BFLOAT16_VERSION_SERIAL") != NULL ? getenv("TT_SPATTER_BFLOAT16_VERSION_SERIAL") : "0" , "1") == 0){
+    input_run = 1;
+  }else if(strcmp(getenv("TT_SPATTER_BFLOAT16_VERSION_PARALLEL") != NULL ? getenv("TT_SPATTER_BFLOAT16_VERSION_PARALLEL") : "0" , "1") == 0){
+    input_run = 2;
+  }
+
 #ifdef USE_MPI
   MPI_Barrier(MPI_COMM_WORLD);
 #endif
+    
+if(input_run == 1) { //TT_SPATTER_BFLOAT16_VERSION_SERIAL
+    constexpr CoreCoord core = {0,0};
+    constexpr uint32_t device_id = 0; 
+    IDevice *device = CreateDevice(device_id);
+    CommandQueue& cq = device->command_queue();
+    Program program  = CreateProgram();
+    uint32_t single_tile_size = 32 * 32;
+    uint32_t n_tiles = sparse.size() / single_tile_size;
+    uint32_t n_tiles_rem = (sparse.size() % single_tile_size) > 0 ? 1 : 0;
+    if(n_tiles_rem > 0){
+      n_tiles = n_tiles + 1;
+    }
+    uint32_t sparse_buf_size = sizeof(bfloat16) * single_tile_size * n_tiles;
+    uint32_t dense_buf_size = sizeof(bfloat16) * single_tile_size;
+    uint32_t sparse_buf_page_size = sizeof(bfloat16) * single_tile_size;
+    uint32_t dense_buf_page_size = sizeof(bfloat16) * single_tile_size;
 
+    uint32_t pattern_buf_size = sizeof(bfloat16) * single_tile_size;
+    uint32_t pattern_buf_page_size = sizeof(bfloat16) * single_tile_size;
+
+    printf("Total No.of Tiles = %u Count = %zu\n", n_tiles, count);
+    
+    tt_metal::BufferConfig buffer_config_sparse = {
+            .device = device,
+            .size = sparse_buf_size ,
+            .page_size = sparse_buf_page_size,
+            .buffer_type = tt_metal::BufferType::DRAM
+    };
+
+    tt_metal::BufferConfig buffer_config_pattern = {
+            .device = device,
+            .size = pattern_buf_size,
+            .page_size = pattern_buf_page_size,
+            .buffer_type = tt_metal::BufferType::DRAM
+    };
+
+    tt_metal::BufferConfig buffer_config_dense = {
+            .device = device,
+            .size = dense_buf_size,
+            .page_size = dense_buf_page_size,
+            .buffer_type = tt_metal::BufferType::DRAM
+    };
+
+    std::shared_ptr<tt::tt_metal::Buffer> dram_buffer_sparse = CreateBuffer(buffer_config_sparse);
+    std::shared_ptr<tt::tt_metal::Buffer> dram_buffer_pattern = CreateBuffer(buffer_config_pattern);
+    std::shared_ptr<tt::tt_metal::Buffer> dram_buffer_dense = CreateBuffer(buffer_config_dense);
+
+    //Create circular buffer to move data from DRAM to L1
+    constexpr uint32_t src0_cb_index = tt::CBIndex::c_0;
+
+    uint32_t num_tiles_per_cb = 1;
+    uint32_t buf_src0 = num_tiles_per_cb * dense_buf_page_size;
+    CircularBufferConfig cb0_src0_config = CircularBufferConfig(
+        buf_src0,
+        {{src0_cb_index, tt::DataFormat::Float16_b}}).set_page_size(src0_cb_index, dense_buf_page_size);
+    
+    CBHandle cb_src0 = tt_metal::CreateCircularBuffer(
+        program,
+        core,
+        cb0_src0_config);
+
+
+    constexpr uint32_t src1_cb_index = tt::CBIndex::c_1;
+
+    CircularBufferConfig cb1_src1_config = CircularBufferConfig(
+        buf_src0,
+        {{src1_cb_index, tt::DataFormat::Float16_b}}).set_page_size(src1_cb_index, pattern_buf_page_size);
+
+    CBHandle cb_id1 = tt_metal::CreateCircularBuffer(
+        program,
+        core,
+        cb1_src1_config
+    );
+
+    constexpr uint32_t dst_cb_index = tt::CBIndex::c_2;
+
+    CircularBufferConfig cb_dst_config = CircularBufferConfig(
+        buf_src0,
+        {{dst_cb_index, tt::DataFormat::Float16_b}}).set_page_size(dst_cb_index, sparse_buf_page_size);
+
+    CBHandle cb_out = tt_metal::CreateCircularBuffer(
+        program,
+        core,
+        cb_dst_config
+    );
+
+    //Create datamovement kernels
+    KernelHandle void_data_kernel_noc0_read = CreateKernel(
+                    program,
+                    "tt_metal/programming_examples/spatter_in_compute/src/Spatter/kernels/data/scatter_read_kernel_compute.cpp",
+                    core,
+                    DataMovementConfig{.processor = DataMovementProcessor::RISCV_0, .noc = NOC::RISCV_0_default});
+
+
+    KernelHandle void_data_kernel_noc1_write = CreateKernel(
+                    program,
+                    "tt_metal/programming_examples/spatter_in_compute/src/Spatter/kernels/data/scatter_write_kernel_compute.cpp",
+                    core,
+                    DataMovementConfig{.processor = DataMovementProcessor::RISCV_1, .noc = NOC::RISCV_1_default});
+    
+
+    /* Set the parameters that the compute kernel will use */
+    std::vector<uint32_t> compute_kernel_args = {};
+
+    /* Use the add_tiles operation in the compute kernel */
+    KernelHandle eltwise_binary_kernel_id = CreateKernel(
+        program,
+        "tt_metal/programming_examples/spatter_in_compute/src/Spatter/kernels/compute/scatter_compute_kernel.cpp",
+        core,
+        ComputeConfig{
+            .math_fidelity = MathFidelity::HiFi4,
+            .fp32_dest_acc_en = false,
+            .math_approx_mode = false,
+            .compile_args = compute_kernel_args,
+        }
+    );
+    //Declare pattern and sparse arrays
+    std::vector<bfloat16> dense_vec(single_tile_size);
+    std::vector<bfloat16> pattern_mat_val(single_tile_size);
+
+    for(uint32_t i=0; i < single_tile_size ; i++){
+        dense_vec[i] = bfloat16((float)dense[i % pattern_length]);
+    }
+    uint32_t stride_len = pattern[1];
+    float in_val = 0;
+    for(int i=0; i < single_tile_size ; i++){
+      pattern_mat_val[i] = bfloat16(in_val);
+    }
+
+    EnqueueWriteBuffer(cq, dram_buffer_dense, dense_vec, false);
+    EnqueueWriteBuffer(cq, dram_buffer_pattern, pattern_mat_val, false);
+
+    SetRuntimeArgs(program, void_data_kernel_noc0_read, core, {dram_buffer_dense->address(), dram_buffer_pattern->address(), n_tiles});
+    SetRuntimeArgs(program, eltwise_binary_kernel_id, core, {n_tiles});
+    SetRuntimeArgs(program, void_data_kernel_noc1_write, core, {dram_buffer_sparse->address(), n_tiles});
+
+    if (timed)
+      timer.start();
+    
+    EnqueueProgram(cq, program, false);
+
+    Finish(cq);
+    
+    if (timed) {
+      timer.stop();
+      time_seconds[run_id] = timer.seconds();
+      timer.clear();
+    }
+    std::vector<bfloat16> sparse_vec;
+
+    EnqueueReadBuffer(cq, dram_buffer_sparse, sparse_vec, true);
+    
+    CloseDevice(device);
+
+#ifdef PRINT_DEBUG
+    printf("Dense_size = %zu pattern_size = %zu sparse_size = %zu\n",dense_vec.size(), pattern_mat_val.size(), sparse_vec.size());
+    printf("TT Input : \n");
+    for(uint32_t i= 0; i < dense.size(); i++){
+      printf("%f ", dense_vec[i].to_float());
+    }
+    printf("\n\n");
+    printf("TT Result : \n");
+    
+    for(uint32_t i= sparse_vec.size() - (pattern_length) ; i < sparse_vec.size(); i++){
+        printf("%f ", sparse_vec[i].to_float());
+    }
+      
+    printf("\n");
+#endif
+
+} else if(input_run == 2){ //TT_SPATTER_BFLOAT16_VERSION_PARALLEL
+    constexpr uint32_t device_id = 0; 
+    IDevice *device = CreateDevice(device_id);
+    CommandQueue& cq = device->command_queue();
+    Program program  = CreateProgram();
+
+    /*
+    * Multi-Core prep
+    */
+    auto compute_with_storage_grid_size = device->compute_with_storage_grid_size();
+    //auto compute_with_storage_grid_size = device->grid_size();
+    uint32_t num_cores_x = compute_with_storage_grid_size.x;
+    uint32_t num_cores_y = compute_with_storage_grid_size.y;
+
+    constexpr CoreCoord core = {0,0};
+    uint32_t single_tile_size = 32 * 32;
+    uint32_t n_tiles = (count * pattern_length)/ single_tile_size; //1024 = 32 * 32
+    uint32_t n_tiles_rem = (sparse.size() % single_tile_size) > 0 ? 1 : 0;
+    if(n_tiles_rem > 0){
+      n_tiles = n_tiles + 1;
+    }
+    uint32_t buf_size = sizeof(bfloat16) * single_tile_size * n_tiles;
+    
+    auto [num_cores, all_cores, core_group_1, core_group_2, num_output_tiles_per_core_group_1, num_output_tiles_per_core_group_2] = split_work_to_cores(compute_with_storage_grid_size, n_tiles);
+
+    uint32_t dest_buf_size = sizeof(bfloat16) * single_tile_size; // num_cores
+    uint32_t buf_page_size = sizeof(bfloat16) * single_tile_size;
+    uint32_t pattern_buf_size = sizeof(bfloat16) * single_tile_size;
+
+    std::cout << "No.of Tiles = " << n_tiles << "  No.of Cores = " << num_cores << std::endl;
+
+    //std::cout << core_group_1.num_cores() << std::endl;
+    //std::cout << core_group_2.num_cores() << std::endl;
+    //std::cout << num_output_tiles_per_core_group_1 << std::endl;
+    //std::cout << num_output_tiles_per_core_group_2 << std::endl;
+
+    tt_metal::BufferConfig buffer_config_a = {
+            .device = device,
+            .size = buf_size ,
+            .page_size = buf_page_size,
+            .buffer_type = tt_metal::BufferType::DRAM
+    };
+
+    tt_metal::BufferConfig buffer_config_b = {
+            .device = device,
+            .size = pattern_buf_size,
+            .page_size = pattern_buf_size,
+            .buffer_type = tt_metal::BufferType::DRAM
+    };
+
+    tt_metal::BufferConfig buffer_config_c = {
+            .device = device,
+            .size = dest_buf_size,
+            .page_size = buf_page_size,
+            .buffer_type = tt_metal::BufferType::DRAM
+    };
+
+    std::shared_ptr<tt::tt_metal::Buffer> dram_buffer = CreateBuffer(buffer_config_a);
+    std::shared_ptr<tt::tt_metal::Buffer> dram_buffer1 = CreateBuffer(buffer_config_b);
+    std::shared_ptr<tt::tt_metal::Buffer> dram_buffer2 = CreateBuffer(buffer_config_c);
+
+    //Create circular buffer to move data from DRAM to L1
+
+    constexpr uint32_t src0_cb_index = tt::CBIndex::c_0;
+
+    uint32_t num_tiles_per_cb = 1;
+    uint32_t buf_src0 = num_tiles_per_cb * buf_page_size;
+    CircularBufferConfig cb0_src0_config = CircularBufferConfig(
+        num_tiles_per_cb * buf_page_size,
+        {{src0_cb_index, tt::DataFormat::Float16_b}}).set_page_size(src0_cb_index, buf_page_size);
+    
+    CBHandle cb_src0 = tt_metal::CreateCircularBuffer(
+        program,
+        all_cores,
+        cb0_src0_config);
+
+
+    constexpr uint32_t src1_cb_index = tt::CBIndex::c_1;
+
+    CircularBufferConfig cb1_src1_config = CircularBufferConfig(
+        num_tiles_per_cb * pattern_buf_size,
+        {{src1_cb_index, tt::DataFormat::Float16_b}}).set_page_size(src1_cb_index, pattern_buf_size);
+
+    CBHandle cb_id1 = tt_metal::CreateCircularBuffer(
+        program,
+        all_cores,
+        cb1_src1_config
+    );
+
+    constexpr uint32_t dst_cb_index = tt::CBIndex::c_2;
+
+    CircularBufferConfig cb_dst_config = CircularBufferConfig(
+        num_tiles_per_cb * dest_buf_size,
+        {{dst_cb_index, tt::DataFormat::Float16_b}}).set_page_size(dst_cb_index, buf_page_size);
+
+    CBHandle cb_out = tt_metal::CreateCircularBuffer(
+        program,
+        all_cores,
+        cb_dst_config
+    );
+
+    //Create datamovement kernels
+    KernelHandle void_data_kernel_noc0_read = CreateKernel(
+                    program,
+                    "tt_metal/programming_examples/spatter_in_compute/src/Spatter/kernels/data/scatter_read_kernel_compute_mc.cpp",
+                    all_cores,
+                    DataMovementConfig{.processor = DataMovementProcessor::RISCV_0, .noc = NOC::RISCV_0_default});
+
+
+    KernelHandle void_data_kernel_noc1_write = CreateKernel(
+                    program,
+                    "tt_metal/programming_examples/spatter_in_compute/src/Spatter/kernels/data/scatter_write_kernel_compute_mc.cpp",
+                    all_cores,
+                    DataMovementConfig{.processor = DataMovementProcessor::RISCV_1, .noc = NOC::RISCV_1_default});
+    
+
+    /* Set the parameters that the compute kernel will use */
+    std::vector<uint32_t> compute_kernel_args = {};
+
+    /* Use the add_tiles operation in the compute kernel */
+    KernelHandle eltwise_binary_kernel_id = CreateKernel(
+        program,
+        "tt_metal/programming_examples/spatter_in_compute/src/Spatter/kernels/compute/scatter_compute_kernel_mc.cpp",
+        all_cores,
+        ComputeConfig{
+            .math_fidelity = MathFidelity::HiFi4,
+            .fp32_dest_acc_en = false,
+            .math_approx_mode = false,
+            .compile_args = compute_kernel_args,
+        }
+    );
+    //Input pattern and sparse arrary
+    std::vector<bfloat16> dense_vec(single_tile_size);
+    std::vector<bfloat16> pattern_mat_val(single_tile_size);
+    
+    for(uint32_t i=0; i < single_tile_size ; i++){
+      dense_vec[i] =  bfloat16((float)dense[i % pattern_length]);
+    }
+
+    uint32_t stride_len = pattern[1];
+    float in_val = 0;
+
+    for(int i=0; i < single_tile_size ; i++){
+      pattern_mat_val[i] = bfloat16(in_val);
+    }
+    EnqueueWriteBuffer(cq, dram_buffer2, dense_vec, false);
+    EnqueueWriteBuffer(cq, dram_buffer1, pattern_mat_val, false);
+
+    for (uint32_t i = 0, num_tiles_written = 0; i < num_cores; i++){
+ 
+        CoreCoord core = {i / num_cores_y, i % num_cores_y};
+
+        uint32_t num_output_tiles_per_core = 0;
+        if (core_group_1.contains(core)) {
+        num_output_tiles_per_core = num_output_tiles_per_core_group_1;
+        } else if (core_group_2.contains(core)) {
+            num_output_tiles_per_core = num_output_tiles_per_core_group_2;
+        } else {
+            TT_ASSERT(false, "Core not in specified core ranges");
+        }
+        SetRuntimeArgs(program,
+         void_data_kernel_noc0_read,
+         core,
+         {dram_buffer2->address(),
+         dram_buffer1->address(),
+         n_tiles,
+         num_tiles_written,
+         num_output_tiles_per_core, 
+         i});
+
+        SetRuntimeArgs(program, eltwise_binary_kernel_id, core, {n_tiles, num_tiles_written, num_output_tiles_per_core, i, num_cores});
+        SetRuntimeArgs(program, void_data_kernel_noc1_write, core, {dram_buffer->address(), n_tiles, num_tiles_written, num_output_tiles_per_core, i, num_cores});
+        num_tiles_written += num_output_tiles_per_core;
+    }
+
+    if (timed)
+      timer.start();
+    
+    EnqueueProgram(cq, program, false);
+
+    Finish(cq);
+    
+    if (timed) {
+      timer.stop();
+      time_seconds[run_id] = timer.seconds();
+      timer.clear();
+    }
+    //To Enable Profiling
+    /////tt_metal::DumpDeviceProfileResults(device, program);
+
+    //Output data
+    std::vector<bfloat16> sparse_vec;
+    EnqueueReadBuffer(cq, dram_buffer, sparse_vec, true);
+
+#ifdef PRINT_DEBUG  
+    printf("Dense_size = %zu pattern_size = %zu sparse_size = %zu\n",dense_vec.size(), pattern_mat_val.size(), sparse_vec.size());
+    
+    printf("TT Input : \n");
+    for(uint32_t i= 0; i < dense.size(); i = i+stride_len){
+      printf("%f ", dense_vec[i].to_float());
+    }
+
+    printf("\n");
+    printf("TT Result : \n");
+    //if(n_tiles_rem > 0){
+    //  for(uint32_t i= (dense_vec.size() * 2) - 512; i < dense_vec.size() * 2 - 20; i = i+stride_len){
+    //    printf("%f ", c_bf16[i].to_float());
+    //  }
+    // }
+    //else {
+      for(uint32_t i= sparse_vec.size() - (pattern_length * stride_len); i < sparse_vec.size(); i = i+stride_len){
+        printf("%f ", sparse_vec[i].to_float());
+      }  
+    //}
+    printf("\n\n");
+#endif
+    CloseDevice(device);
+
+} else { //Host Run
   if (timed)
     timer.start();
-
-  for (size_t i = 0; i < count; ++i)
-    for (size_t j = 0; j < pattern_length; ++j)
+  printf("%zu %zu %zu %zu\n", count , pattern_length, dense.size(), sparse.size());
+  for (size_t i = 0; i < count; ++i) {
+    for (size_t j = 0; j < pattern_length; ++j) {
       sparse[pattern[j] + delta * i] = dense[j + pattern_length * (i % wrap)];
-
+      //if(i > (count - 3))
+      //  printf("%f ", sparse[pattern[j] + delta * i]);
+    }
+  }
   if (timed) {
     timer.stop();
     time_seconds[run_id] = timer.seconds();
     timer.clear();
   }
+}
+
 }
 
 void Configuration<Spatter::Serial>::scatter_gather(
